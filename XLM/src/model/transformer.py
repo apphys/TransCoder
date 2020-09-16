@@ -716,7 +716,7 @@ class TransformerModel(nn.Module):
                     # get beam and word IDs
                     beam_id = idx // n_words
                     word_id = idx % n_words
-                    print(cur_len, idx, ' beam id ', beam_id)
+                    #print(cur_len, idx, ' beam id ', beam_id)
 
                     # next_word is <eos>, so generation ends. Add the sentence to the hyp pool
                     # generated_hyps is updated only <eos> is predicted
@@ -780,14 +780,14 @@ class TransformerModel(nn.Module):
                 break
         # done looping through all cur_len
 
-        # visualize hypotheses
-        print([len(x) for x in generated_hyps], cur_len)
-        globals().update( locals() );
-        import code; code.interact(local=vars())
-        for ii in range(bs):
-            for ss, ww in sorted(generated_hyps[ii].hyp, key=lambda x: x[0], reverse=True):
-                print("%.3f " % ss + " ".join(self.dico[x] for x in ww.tolist()))
-            print("")
+        ## visualize hypotheses
+        #print([len(x) for x in generated_hyps], cur_len)
+        #globals().update( locals() );
+        #import code; code.interact(local=vars())
+        #for ii in range(bs):
+        #    for ss, ww in sorted(generated_hyps[ii].hyp, key=lambda x: x[0], reverse=True):
+        #        print("%.3f " % ss + " ".join(self.dico[x] for x in ww.tolist()))
+        #    print("")
 
         # select the best hypotheses
         tgt_len = src_len.new(bs)
@@ -844,7 +844,7 @@ class BeamHypotheses(object):
         generated_hyps is updated (this function called) only <eos> is predicted
         or the max length is reached.
         """
-        print('adding phys ...')
+        #print('adding phys ...')
         score = sum_logprobs / len(hyp) ** self.length_penalty
         if len(self) < self.n_hyp or score > self.worst_score:
             self.hyp.append((score, hyp))
@@ -853,12 +853,12 @@ class BeamHypotheses(object):
             if len(self) > self.n_hyp: 
                 sorted_scores = sorted([(s, idx)
                                         for idx, (s, _) in enumerate(self.hyp)])
-                print('remove a hyp with inferior score ', sorted_scores[0][1]) 
+                #print('remove a hyp with inferior score ', sorted_scores[0][1]) 
                 del self.hyp[sorted_scores[0][1]]
                 self.worst_score = sorted_scores[1][0]
             else: # don't have enough hyp yet, just add 
                 self.worst_score = min(score, self.worst_score)
-            print('currrent worst score ', self.worst_score)
+            #print('currrent worst score ', self.worst_score)
 
     def is_done(self, best_sum_logprobs):
         """

@@ -1,0 +1,32 @@
+python XLM/train.py \
+--n_heads 8 \
+--bt_steps 'python_sa-cpp_sa-python_sa,cpp_sa-python_sa-cpp_sa,java_sa-cpp_sa-java_sa,cpp_sa-java_sa-cpp_sa,python_sa-java_sa-python_sa,java_sa-python_sa-java_sa' \
+--max_vocab '-1'  \
+--word_blank '0.1' \
+--n_layers 6  \
+--generate_hypothesis true \
+--max_len 512 \
+--bptt 256  \
+--fp16 true \
+--share_inout_emb true \
+--tokens_per_batch 6000 \
+--has_sentences_ids true \
+--eval_bleu true  \
+--split_data false  \
+--data_path '/root/TransCoder/data/XLM-cpp-java-python-with-comments'  \
+--eval_computation true \
+--batch_size 32 \
+--reload_model 'pretrained-model/model_1.pth,pretrained-model/model_1.pth'  \
+--amp 2  \
+--max_batch_size 128 \
+--ae_steps 'cpp_sa,python_sa,java_sa' \
+--emb_dim 1024 \
+--eval_only True \
+--beam_size 10 \
+--retry_mistmatching_types 1 \
+--dump_path '/tmp/' \
+--exp_name='eval_final_model_wc_30' \
+--lgs 'cpp_sa-java_sa-python_sa' \
+--encoder_only=False
+
+# The evaluator will use this parameter to infer the languages to test on

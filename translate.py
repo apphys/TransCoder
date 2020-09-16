@@ -54,6 +54,10 @@ def get_parser():
 class Translator:
     def __init__(self, params):
         reloaded = torch.load(params.model_path, map_location='cpu')
+#        print(reloaded['dico_word2id']['while'])
+#        print(reloaded['dico_word2id']['return'])
+#        print(reloaded['dico_word2id']['if'])
+        
 #        print(reloaded['encoder'].keys())
 #        print(reloaded['decoder'].keys())
         reloaded['encoder'] = {(k[len('module.'):] if k.startswith('module.') else k): v for k, v in
