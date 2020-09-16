@@ -18,10 +18,10 @@ import clang
 import preprocessing.src.javalang_tokenizer as javalang_tok
 from clang.cindex import TokenKind
 from preprocessing.src.timeout import timeout, TimeoutError
-from sacrebleu import tokenize_v14_international
+from sacrebleu import TOKENIZERS 
 
 TOK_NO_SPACE_BEFORE = {',', ';'}
-clang.cindex.Config.set_library_path('/usr/lib/llvm-7/lib/')
+clang.cindex.Config.set_library_path('/usr/lib/llvm-10/lib/')
 STRINGS_AND_COMMENTS_TOKEN_KINDS = {TokenKind.LITERAL, TokenKind.COMMENT}
 logging.basicConfig(
     filename='timeout_cpp_tokenizer_examples.log', level=logging.DEBUG)
@@ -59,7 +59,7 @@ PYTHON_CHAR2TOKEN = {'#': ' STOKEN0 ',
                      '"""': ' STOKEN2 ',
                      "'''": ' STOKEN3 '
                      }
-
+tokenizer = TOKENIZERS['intl']()
 
 class ind_iter(object):
     def __init__(self, len):
@@ -93,7 +93,9 @@ def process_string(tok, char2tok, tok2char, is_comment):
     tok = tok.replace('\n', ' STRNEWLINE ')
     tok = tok.replace('\t', ' TABSYMBOL ')
     tok = re.sub(' +', ' ', tok)
-    tok = tokenize_v14_international(tok)
+#    import pdb; pdb.set_trace()
+#    tok = tokenize_v14_international(tok)
+    tok = tokenizer(tok)
     tok = re.sub(' +', ' ', tok)
     for special_token, char in tok2char.items():
         tok = tok.replace(special_token, char)
@@ -334,7 +336,9 @@ def tokenize_cpp(s, keep_comments=False):
     tokens = []
     assert isinstance(s, str)
     try:
+#        import pdb; pdb.set_trace()
         tokens_and_types = get_cpp_tokens_and_types(s)
+#        import pdb; pdb.set_trace()
         for tok, typ in tokens_and_types:
             if not keep_comments and typ == TokenKind.COMMENT:
                 continue

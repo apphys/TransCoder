@@ -10,6 +10,14 @@ import pytest
 
 TESTS = []
 TESTS.append((
+r"""
+for index in 1...5{
+}
+""",
+[]
+))
+
+TESTS.append((
     r"""
 // This is a   comment
 // ------- ******* -------

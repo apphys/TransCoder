@@ -278,7 +278,7 @@ def main(params):
 
         while trainer.n_sentences < trainer.epoch_size:
 
-            # CLM steps
+            # CLM steps (causal languge model)
             for lang1, lang2 in shuf_order(params.clm_steps, params):
                 trainer.clm_step(lang1, lang2, params.lambda_clm)
 

@@ -124,6 +124,7 @@ class PredLayer(nn.Module):
 
     def get_scores(self, x):
         """
+        x : [batch, dim]
         Compute scores.
         """
         assert x.dim() == 2
@@ -134,6 +135,7 @@ class MultiHeadAttention(nn.Module):
 
     NEW_ID = itertools.count()
 
+    # dim: decoder dimension when used with decoder
     def __init__(self, n_heads, dim, dim_encoder=None, dropout=0):
         super().__init__()
         self.layer_id = next(MultiHeadAttention.NEW_ID)
@@ -143,8 +145,8 @@ class MultiHeadAttention(nn.Module):
         self.dropout = dropout
         assert self.dim % self.n_heads == 0
 
-        self.q_lin = Linear(dim, dim)
-        self.k_lin = Linear(self.dim_encoder, dim)
+        self.q_lin = Linear(dim, dim)  # q is using the decoder dim when used in decoder
+        self.k_lin = Linear(self.dim_encoder, dim) # use encoder dim as input dim in encoder-decoder attn 
         self.v_lin = Linear(self.dim_encoder, dim)
         self.out_lin = Linear(dim, dim)
 
@@ -337,36 +339,44 @@ class TransformerModel(nn.Module):
             `x` LongTensor(slen, bs), containing word indices
             `lengths` LongTensor(bs), containing the length of each sentence
             `causal` Boolean, if True, the attention is only done over previous hidden states
+                     True for decoder, False for encoder
             `positions` LongTensor(slen, bs), containing word positions
             `langs` LongTensor(slen, bs), containing language IDs
+            `src_enc` (batch, src_seq_len, dim)
+        Returns:
+            `tensor` [seq_len, batch, dim]
         """
         # lengths = (x != self.pad_index).float().sum(dim=1)
         # mask = x != self.pad_index
 
         assert not(use_cache and self.cache is None)
         # check inputs
-        slen, bs = x.size()
+        slen, bs = x.size()   # [seq_len, batch]
         assert lengths.size(0) == bs
         assert lengths.max().item() <= slen
-        x = x.transpose(0, 1)  # batch size as dimension 0
+        x = x.transpose(0, 1)  # batch size as dimension 0  , x : [batch, seq_len]
         assert (src_enc is None) == (src_len is None)
         if src_enc is not None:
             assert self.is_decoder
             assert src_enc.size(0) == bs
 
         # generate masks
+        # mask: [batch, seq_len]
+        # attn_mask: 
+        #   for encoder: [batch, seq_len]
+        #   for decoder: [batch, seq_len, seq_len]
         mask, attn_mask = get_masks(slen, lengths, causal)
         if self.is_decoder and src_enc is not None:
-            src_mask = torch.arange(
+            src_mask = torch.arange( # [batch, src_seq_len]
                 src_enc.shape[1], dtype=torch.long, device=lengths.device) < src_len[:, None]
 
         # positions
-        if positions is None:
+        if positions is None:  # for encoder
             positions = x.new(slen).long()
-            positions = torch.arange(slen, out=positions).unsqueeze(0)
-        else:
+            positions = torch.arange(slen, out=positions).unsqueeze(0) # [batch, src_seq_len]
+        else: # for decoder
             assert positions.size() == (slen, bs)
-            positions = positions.transpose(0, 1)
+            positions = positions.transpose(0, 1) # [batch, seq_len]
 
         # langs
         if langs is not None:
@@ -374,25 +384,27 @@ class TransformerModel(nn.Module):
             langs = langs.transpose(0, 1)
 
         # do not recompute cached elements
-        if use_cache:
+        if use_cache: # for decoder
             _slen = slen - self.cache['slen']
-            x = x[:, -_slen:]
-            positions = positions[:, -_slen:]
+            x = x[:, -_slen:] # [batch, 1, dim]
+            positions = positions[:, -_slen:] # [batch, 1]
             if langs is not None:
                 langs = langs[:, -_slen:]
+            # mask: [batch, 1]
             mask = mask[:, -_slen:]
+            # attn_mask: [batch, 1, seq_len]
             attn_mask = attn_mask[:, -_slen:]
 
         # embeddings
-        tensor = self.embeddings(x)
+        tensor = self.embeddings(x) # [batch, seq_len, dim], for decoder seq_len = 1
         tensor = tensor + self.position_embeddings(positions).expand_as(tensor)
         if langs is not None and self.use_lang_emb:
             tensor = tensor + self.lang_embeddings(langs)
-        tensor = self.layer_norm_emb(tensor)
+        tensor = self.layer_norm_emb(tensor) #  [batch, seq_len, dim], for decoder seq_len = 1
         tensor = F.dropout(tensor, p=self.dropout, training=self.training)
-        tensor *= mask.unsqueeze(-1).to(tensor.dtype)
+        tensor *= mask.unsqueeze(-1).to(tensor.dtype) #  [batch, seq_len, dim], for decoder seq_len = 1
 
-        # transformer layers
+        # transformer layers (GPT1 architecture)
         for i in range(self.n_layers):
 
             # self attention
@@ -404,8 +416,11 @@ class TransformerModel(nn.Module):
 
             # encoder attention (for decoder only)
             if self.is_decoder and src_enc is not None:
-                assert src_enc.shape[1] == src_mask.shape[-1]
+                assert src_enc.shape[1] == src_mask.shape[-1] 
                 self.encoder_attn[i].cache = self.cache
+                # tensor [batch, seq_len=1, dim]
+                # src_enc: [batch, src_seq_len, dim]
+                # src_mask: [batch, src_seq_len]
                 attn = self.encoder_attn[i](
                     tensor, src_mask, kv=src_enc, use_cache=use_cache)
                 attn = F.dropout(attn, p=self.dropout, training=self.training)
@@ -423,7 +438,7 @@ class TransformerModel(nn.Module):
             self.cache['slen'] += tensor.size(1)
 
         # move back sequence length to dimension 0
-        tensor = tensor.transpose(0, 1)
+        tensor = tensor.transpose(0, 1) # [seq_len, batch, dim]
 
         return tensor
 
@@ -443,21 +458,25 @@ class TransformerModel(nn.Module):
 
     def generate(self, src_enc, src_len, tgt_lang_id, max_len=200, sample_temperature=None):
         """
-        Decode a sentence given initial start.
-        `x`:
-            - LongTensor(bs, slen)
-                <EOS> W1 W2 W3 <EOS> <PAD>
-                <EOS> W1 W2 W3   W4  <EOS>
-        `lengths`:
-            - LongTensor(bs) [5, 6]
-        `positions`:
-            - False, for regular "arange" positions (LM)
-            - True, to reset positions from the new generation (MT)
-        `langs`:
-            - must be None if the model only supports one language
-            - lang_id if only one language is involved (LM)
-            - (lang_id1, lang_id2) if two languages are involved (MT)
+        src_enc : [batch, src_len, emb=1024]
+        src_len : source seq len
         """
+#        """
+#        Decode a sentence given initial start.
+#        `x`:
+#            - LongTensor(bs, slen)
+#                <EOS> W1 W2 W3 <EOS> <PAD>
+#                <EOS> W1 W2 W3   W4  <EOS>
+#        `lengths`:
+#            - LongTensor(bs) [5, 6]
+#        `positions`:
+#            - False, for regular "arange" positions (LM)
+#            - True, to reset positions from the new generation (MT)
+#        `langs`:
+#            - must be None if the model only supports one language
+#            - lang_id if only one language is involved (LM)
+#            - (lang_id1, lang_id2) if two languages are involved (MT)
+#        """
 
         if isinstance(max_len, int):
             max_lengths = src_len.clone().fill_(max_len)
@@ -470,29 +489,29 @@ class TransformerModel(nn.Module):
         bs = len(src_len)
         assert src_enc.size(0) == bs
 
-        # generated sentences
+        # generated sentences [max_seq_len, batch]
         generated = src_len.new(global_max_len, bs)  # upcoming output
         generated.fill_(self.pad_index)       # fill upcoming ouput with <PAD>
         # we use <EOS> for <BOS> everywhere
-        generated[0].fill_(self.eos_index)
+        generated[0].fill_(self.eos_index) 
 
-        # positions
+        # positions [seq_len, batch], values ranging from 0 to seq_len
         positions = src_len.new(global_max_len).long()
         positions = torch.arange(global_max_len, out=positions).unsqueeze(
             1).expand(global_max_len, bs)
 
-        # language IDs
+        # language IDs [seq_len, batch]
         langs = src_len.new(global_max_len).long().fill_(tgt_lang_id)
         langs = langs.unsqueeze(1).expand(global_max_len, bs)
 
         # current position / max lengths / length of generated sentences / unfinished sentences
         cur_len = 1
-        gen_len = src_len.clone().fill_(1)
-        unfinished_sents = src_len.clone().fill_(1)
+        gen_len = src_len.clone().fill_(1) # [batch] of 1
+        unfinished_sents = src_len.clone().fill_(1) # [batch] of 1
 
         # cache compute states
         self.cache = {'slen': 0}
-        previous_unfinished_mask = unfinished_sents.ne(0)
+        previous_unfinished_mask = unfinished_sents.ne(0) # [batch] of True
         while cur_len < global_max_len:
             # compute word scores
             unfinished_mask = unfinished_sents.ne(0)
@@ -507,9 +526,9 @@ class TransformerModel(nn.Module):
                         self.cache[k] = (cached_tensor[restricted_mask]
                                          for cached_tensor in v)
 
-            tensor = self.forward(
+            tensor = self.forward( # [seq_len=1,batch, dim]
                 'fwd',
-                x=generated[:cur_len, unfinished_mask],
+                x=generated[:cur_len, unfinished_mask], # unfinished_mask = [True], masking batch?
                 lengths=gen_len[unfinished_mask],
                 positions=positions[:cur_len, unfinished_mask],
                 langs=langs[:cur_len][:, unfinished_mask],
@@ -520,12 +539,12 @@ class TransformerModel(nn.Module):
             )
             assert tensor.size() == (1, unfinished_mask.sum().item(), self.dim), (cur_len,
                                                                                   global_max_len, src_enc.size(), tensor.size(), (1, bs, self.dim))
-            tensor = tensor.data[-1, :, :].type_as(src_enc)  # (bs, dim)
-            scores = self.pred_layer.get_scores(tensor)  # (bs, n_words)
+            tensor = tensor.data[-1, :, :].type_as(src_enc)  # [batch, dim]
+            scores = self.pred_layer.get_scores(tensor)  # [batch, n_words]
 
             # select next words: sample or greedy
             if sample_temperature is None:
-                next_words = torch.topk(scores, 1)[1].squeeze(1)
+                next_words = torch.topk(scores, 1)[1].squeeze(1) # [batch]
             else:
                 next_words = torch.multinomial(
                     F.softmax(scores.float() / sample_temperature, dim=1), 1).squeeze(1)
@@ -533,11 +552,11 @@ class TransformerModel(nn.Module):
 
             # update generations / lengths / finished sentences / current length.
             # No need to updates the finished sequences since the value is self.pad_index by default
-            generated[cur_len, unfinished_mask] = next_words
+            generated[cur_len, unfinished_mask] = next_words # [max_seq_len, batch]
 
-            gen_len.add_(unfinished_sents)
+            gen_len.add_(unfinished_sents)  # [batch] of current generated seq len ex. [35]
             generated[cur_len].masked_fill_(max_lengths.eq(
-                cur_len + 1) & unfinished_sents.eq(1), self.eos_index)
+                cur_len + 1) & unfinished_sents.eq(1), self.eos_index) # when the generated seq finishes, append <eos> to the end of the seq
             unfinished_sents[unfinished_mask] = unfinished_sents[unfinished_mask].mul(next_words.ne(
                 self.eos_index).long()).mul(max_lengths[unfinished_mask].ne(cur_len+1).long())
 
@@ -555,21 +574,25 @@ class TransformerModel(nn.Module):
 
     def generate_beam(self, src_enc, src_len, tgt_lang_id, beam_size, length_penalty, early_stopping, max_len=200):
         """
-        Decode a sentence given initial start.
-        `x`:
-            - LongTensor(bs, slen)
-                <EOS> W1 W2 W3 <EOS> <PAD>
-                <EOS> W1 W2 W3   W4  <EOS>
-        `lengths`:
-            - LongTensor(bs) [5, 6]
-        `positions`:
-            - False, for regular "arange" positions (LM)
-            - True, to reset positions from the new generation (MT)
-        `langs`:
-            - must be None if the model only supports one language
-            - lang_id if only one language is involved (LM)
-            - (lang_id1, lang_id2) if two languages are involved (MT)
+        src_enc : [batch, src_seq_len, dim=1024]
+        src_len : source seq len
         """
+#        """
+#        Decode a sentence given initial start.
+#        `x`:
+#            - LongTensor(bs, slen)
+#                <EOS> W1 W2 W3 <EOS> <PAD>
+#                <EOS> W1 W2 W3   W4  <EOS>
+#        `lengths`:
+#            - LongTensor(bs) [5, 6]
+#        `positions`:
+#            - False, for regular "arange" positions (LM)
+#            - True, to reset positions from the new generation (MT)
+#        `langs`:
+#            - must be None if the model only supports one language
+#            - lang_id if only one language is involved (LM)
+#            - (lang_id1, lang_id2) if two languages are involved (MT)
+#        """
         if isinstance(max_len, int):
             max_lengths = src_len.clone().fill_(max_len)
             global_max_len = max_len
@@ -586,20 +609,22 @@ class TransformerModel(nn.Module):
         n_words = self.n_words
 
         # expand to beam size the source latent representations / source lengths
-        src_enc = src_enc.unsqueeze(1).expand(
+        src_enc = src_enc.unsqueeze(1).expand(  # [batch, src_seq_len, dim] --> [beam * beam, src_seq_len, dim]
             (bs, beam_size) + src_enc.shape[1:]).contiguous().view((bs * beam_size,) + src_enc.shape[1:])
-        src_len = src_len.unsqueeze(1).expand(
+        src_len = src_len.unsqueeze(1).expand( # [batch] --> [batch * beam]
             bs, beam_size).contiguous().view(-1)
 
-        # generated sentences (batch with beam current hypotheses)
-        generated = src_len.new(global_max_len, bs *
-                                beam_size)  # upcoming output
+        # generated stores the best path (or generated seq/sentence token ids) 
+        # for each beam and each sample in the batch
+        # [max_seq_len, batch_size * beam]
+        generated = src_len.new(global_max_len, bs *  
+                                beam_size)  # upcoming output 
         # fill upcoming ouput with <PAD>
-        generated.fill_(self.pad_index)
+        generated.fill_(self.pad_index)  # pad_index = 2
         # we use <EOS> for <BOS> everywhere
-        generated[0].fill_(self.eos_index)
+        generated[0].fill_(self.eos_index) # eos_index = 1
 
-        # generated hypotheses
+        # generated hypotheses, one for each sentence in the batch
         generated_hyps = [BeamHypotheses(
             beam_size, global_max_len, length_penalty, early_stopping) for _ in range(bs)]
 
@@ -614,7 +639,7 @@ class TransformerModel(nn.Module):
         # scores for each sentence in the beam
         beam_scores = src_enc.new(bs, beam_size).float().fill_(0)
         beam_scores[:, 1:] = -1e9
-        beam_scores = beam_scores.view(-1)
+        beam_scores = beam_scores.view(-1) # [batch * beam]
 
         # current position
         cur_len = 1
@@ -626,11 +651,10 @@ class TransformerModel(nn.Module):
         done = [False for _ in range(bs)]
 
         while cur_len < global_max_len:
-
             # compute word scores
-            tensor = self.forward(
+            tensor = self.forward( # [seq_len = 1, batch * beam, dim]
                 'fwd',
-                x=generated[:cur_len],
+                x=generated[:cur_len],  # generated [max_seq_len, batch * beam]
                 lengths=src_len.new(bs * beam_size).fill_(cur_len),
                 positions=positions[:cur_len],
                 langs=langs[:cur_len],
@@ -638,22 +662,30 @@ class TransformerModel(nn.Module):
                 src_enc=src_enc,
                 src_len=src_len,
                 use_cache=True
-            )
+            ) 
             assert tensor.size() == (1, bs * beam_size, self.dim)
             # (bs * beam_size, dim)
-            tensor = tensor.data[-1, :, :].type_as(src_enc)
-            scores = self.pred_layer.get_scores(
-                tensor)     # (bs * beam_size, n_words)
+            tensor = tensor.data[-1, :, :].type_as(src_enc) # [batch * beam, dim]
+            scores = self.pred_layer.get_scores( # [batch * beam, n_words]
+                tensor)     
             # (bs * beam_size, n_words)
             scores = F.log_softmax(scores.float(), dim=-1)
             assert scores.size() == (bs * beam_size, n_words)
 
             # select next words with scores
             # (bs * beam_size, n_words)
-            _scores = scores + beam_scores[:, None].expand_as(scores)
+            _scores = scores + beam_scores[:, None].expand_as(scores) # [batch * beam, n_words]
             # (bs, beam_size * n_words)
-            _scores = _scores.view(bs, beam_size * n_words)
+            _scores = _scores.view(bs, beam_size * n_words) # [batch, beam * n_words]
 
+            # next_scores, next_words both [batch, 2 * beam]
+            # k = 2 * beam, because the next word can be either a <eos> or not 
+            # must have a non <eos> option, just in case. Otherwise might not
+            # be able to fill all beams with meaningful sequences. 
+            # For example, in beam = 2, at first step
+            # one beam predicts <eos>, so can only return 1 beam. So must have some
+            # non <eos> options. With twice the beam size of candidates, we can
+            # gaurantee to fill the beams.
             next_scores, next_words = torch.topk(
                 _scores, 2 * beam_size, dim=1, largest=True, sorted=True)
             assert next_scores.size() == next_words.size() == (bs, 2 * beam_size)
@@ -662,7 +694,7 @@ class TransformerModel(nn.Module):
             # list of (bs * beam_size) tuple(next hypothesis score, next word, current position in the batch)
             next_batch_beam = []
 
-            # for each sentence
+            # for each sentence in the batch
             for sent_id in range(bs):
 
                 # if we are done with this sentence
@@ -673,21 +705,25 @@ class TransformerModel(nn.Module):
                         [(0, self.pad_index, 0)] * beam_size)  # pad the batch
                     continue
 
-                # next sentence beam content
+                # next word in a sentence for all beams 
                 next_sent_beam = []
 
-                # next words for this sentence
+                # next_words/next_scores[sent_id].shape = [2 * beam], so (2 * beam) options
+                # next_words contains word ids,    
+                # next_scores contains the summed log_prob of the whole sentence including the predicted token in next_words
                 for idx, value in zip(next_words[sent_id], next_scores[sent_id]):
 
                     # get beam and word IDs
                     beam_id = idx // n_words
                     word_id = idx % n_words
+                    print(cur_len, idx, ' beam id ', beam_id)
 
-                    # end of sentence, or next word
+                    # next_word is <eos>, so generation ends. Add the sentence to the hyp pool
+                    # generated_hyps is updated only <eos> is predicted
                     if word_id == self.eos_index or cur_len + 1 == global_max_len:
                         generated_hyps[sent_id].add(
                             generated[:cur_len, sent_id * beam_size + beam_id].clone(), value.item())
-                    else:
+                    else: # next_word is not <eos>, not a complete hyp yet, don't update generated_hyps
                         next_sent_beam.append(
                             (value, word_id, sent_id * beam_size + beam_id))
 
@@ -703,15 +739,33 @@ class TransformerModel(nn.Module):
                         beam_size  # pad the batch
                 next_batch_beam.extend(next_sent_beam)
                 assert len(next_batch_beam) == beam_size * (sent_id + 1)
+            # Done looping through all sentences in the batch
 
             # sanity check / prepare next batch
             assert len(next_batch_beam) == bs * beam_size
-            beam_scores = beam_scores.new([x[0] for x in next_batch_beam])
-            beam_words = generated.new([x[1] for x in next_batch_beam])
-            beam_idx = src_len.new([x[2] for x in next_batch_beam])
+            beam_scores = beam_scores.new([x[0] for x in next_batch_beam]) # [batch * beam]
+            beam_words = generated.new([x[1] for x in next_batch_beam]) # [batch * beam]
+            beam_idx = src_len.new([x[2] for x in next_batch_beam]) # [batch * beam]
 
-            # re-order batch and internal states
-            generated = generated[:, beam_idx]
+            # !!! the whole generated (memory) is updated
+            # Note all idx in beam_idx can be the same, which means multiple candidates from
+            # the same beam are picked to be the best. Some other inferior beam idx are killed.
+            # If that's the case, then the killed beam idx is filled with the candidate sequence
+            # from the good beam idx. 
+            # For example, before next prediction, current memory in 'generated':
+            # beam 0 (generated[:, 0]) : {2, 1} with prob 0.9
+            # beam 1 (generated[:, 1]) : {5, 4} with prob 0.8
+            # After prediction next word, the best next beam 0: 
+            # {2, 1, 7} with prob 0.7
+            # {2, 1, 3} with prob 0.5
+            # After prediction next word, the best next beam 1: 
+            # {5, 4, 9} with prob 0.2
+            # {5, 4, 1} with prob 0.1
+            # Obviously the two candidates from beam 0 are both better than either one from beam 1,
+            # so 'generated' would be updated with both candidates from the beam 0:
+            # beam 0 (generated[:, 0]) : {2, 1, 7} with prob 0.7
+            # beam 1 (generated[:, 1]) : {2, 1, 3} with prob 0.5
+            generated = generated[:, beam_idx] 
             generated[cur_len] = beam_words
             for k in self.cache.keys():
                 if k != 'slen':
@@ -724,21 +778,22 @@ class TransformerModel(nn.Module):
             # stop when we are done with each sentence
             if all(done):
                 break
+        # done looping through all cur_len
 
         # visualize hypotheses
-        # print([len(x) for x in generated_hyps], cur_len)
-        # globals().update( locals() );
-        # !import code; code.interact(local=vars())
-        # for ii in range(bs):
-        #     for ss, ww in sorted(generated_hyps[ii].hyp, key=lambda x: x[0], reverse=True):
-        #         print("%.3f " % ss + " ".join(self.dico[x] for x in ww.tolist()))
-        #     print("")
+        print([len(x) for x in generated_hyps], cur_len)
+        globals().update( locals() );
+        import code; code.interact(local=vars())
+        for ii in range(bs):
+            for ss, ww in sorted(generated_hyps[ii].hyp, key=lambda x: x[0], reverse=True):
+                print("%.3f " % ss + " ".join(self.dico[x] for x in ww.tolist()))
+            print("")
 
         # select the best hypotheses
         tgt_len = src_len.new(bs)
         best = []
 
-        for i, hypotheses in enumerate(generated_hyps):
+        for i, hypotheses in enumerate(generated_hyps): # for each sentence in the batch
             sorted_hyps = [h[1] for h in sorted(
                 hypotheses.hyp, key=lambda x: x[0], reverse=True)]
             tgt_len[i] = max([len(hyp) for hyp in sorted_hyps]
@@ -763,14 +818,18 @@ class BeamHypotheses(object):
 
     def __init__(self, n_hyp, max_len, length_penalty, early_stopping):
         """
-        Initialize n-best list of hypotheses.
+        n-best list of hypotheses.
+        Only updated (by adding) when <eos> is predicted as next token
+        or the max length is reached.
+        self.hyp contains the summed log prob and the list of token ids 
+        of the generated sequence copied from 'generated'. 
         """
         self.max_len = max_len - 1  # ignoring <BOS>
         self.length_penalty = length_penalty
         self.early_stopping = early_stopping
-        self.n_hyp = n_hyp
-        self.hyp = []
-        self.worst_score = 1e9
+        self.n_hyp = n_hyp  # beam size
+        self.hyp = []  # list of (score, token id list)
+        self.worst_score = 1e9 # larger score is better, but this is to get the min score among n hyps
 
     def __len__(self):
         """
@@ -781,17 +840,25 @@ class BeamHypotheses(object):
     def add(self, hyp, sum_logprobs):
         """
         Add a new hypothesis to the list.
+        hyp: a list of token ids
+        generated_hyps is updated (this function called) only <eos> is predicted
+        or the max length is reached.
         """
+        print('adding phys ...')
         score = sum_logprobs / len(hyp) ** self.length_penalty
         if len(self) < self.n_hyp or score > self.worst_score:
             self.hyp.append((score, hyp))
-            if len(self) > self.n_hyp:
+            # already got enough hyp, but got good score <= self.worst_score
+            # so replace the worst one with this one
+            if len(self) > self.n_hyp: 
                 sorted_scores = sorted([(s, idx)
                                         for idx, (s, _) in enumerate(self.hyp)])
+                print('remove a hyp with inferior score ', sorted_scores[0][1]) 
                 del self.hyp[sorted_scores[0][1]]
                 self.worst_score = sorted_scores[1][0]
-            else:
+            else: # don't have enough hyp yet, just add 
                 self.worst_score = min(score, self.worst_score)
+            print('currrent worst score ', self.worst_score)
 
     def is_done(self, best_sum_logprobs):
         """

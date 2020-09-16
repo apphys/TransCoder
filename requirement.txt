@@ -1,0 +1,14 @@
+clang==10.0.1
+fastBPE==0.1.1
+future==0.18.2
+numpy==1.19.2
+Pillow==7.2.0
+pkg-resources==0.0.0
+portalocker==2.0.0
+sacrebleu==1.4.14
+six==1.15.0
+style==1.1.0
+torch==1.6.0+cu101
+torchvision==0.7.0+cu101
+typing==3.7.4.3
+update==0.0.1
